@@ -1,0 +1,123 @@
+# -----------------------------------------------------------------------------
+# Workflow Name
+# -----------------------------------------------------------------------------
+
+name: PR Validation – Trunk Quality Gate
+
+on:
+  push:
+    branches:
+      - main
+
+  workflow_dispatch:
+    inputs:
+      reason:
+        description: 'Reason for manually triggering PR validation'
+        required: false
+        default: 'Manual PR validation'
+
+env:
+  NODE_VERSION: 22.x
+
+jobs:
+  pr-validation:
+    name: Quality & Security Validation
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+      pull-requests: write
+
+    
+    defaults:
+      run:
+        working-directory: codebase   # ✅ KEY FIX
+  
+    steps:
+      # -----------------------------------------------------------------------
+      # 1. Checkout Source Code (Full History Required for Sonar)
+      # -----------------------------------------------------------------------
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # -----------------------------------------------------------------------
+      # 2. Set Up Node.js
+      # -----------------------------------------------------------------------
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      # -----------------------------------------------------------------------
+      # 3. Install Dependencies (Deterministic)
+      # -----------------------------------------------------------------------
+      - name: Install dependencies
+        run: npm ci
+
+      # -----------------------------------------------------------------------
+      # 4. Lint & Formatting (BLOCKING)
+      # -----------------------------------------------------------------------
+      - name: Lint and formatting check
+        run: |
+          npx biome check .
+          npx eslint . --max-warnings=0
+
+      # -----------------------------------------------------------------------
+      # 5. TypeScript Type Safety (BLOCKING)
+      # -----------------------------------------------------------------------
+      - name: TypeScript type check
+        run: npx tsc --noEmit
+
+      # -----------------------------------------------------------------------
+      # 6. Unit Tests with Coverage (BLOCKING)
+      # Nx affected → monorepo‑optimized
+      # -----------------------------------------------------------------------
+      - name: Run unit tests
+        run: npx nx affected --target=test --coverage
+
+      # -----------------------------------------------------------------------
+      # 7. Component Tests (BLOCKING)
+      # -----------------------------------------------------------------------
+      - name: Run component tests
+        run: npx nx affected --target=component-test
+
+      # -----------------------------------------------------------------------
+      # 8. SonarQube PR Analysis (MANDATORY)
+      # -----------------------------------------------------------------------
+      - name: SonarQube PR analysis
+        uses: SonarSource/sonarqube-scan-action@v6
+        with:
+          args: >
+            -Dsonar.projectKey=webby-monorepo
+            -Dsonar.sources=apps,libs
+            -Dsonar.exclusions=**/dist/**,**/node_modules/**
+            -Dsonar.javascript.lcov.reportPaths=**/coverage/lcov.info
+            -Dsonar.pullrequest.key=${{ github.event.pull_request.number }}
+            -Dsonar.pullrequest.branch=${{ github.head_ref }}
+            -Dsonar.pullrequest.base=${{ github.base_ref }}
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+          SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
+
+      # -----------------------------------------------------------------------
+      # 9. Dependency Vulnerability Scan (SCA – BLOCKING)
+      # -----------------------------------------------------------------------
+      - name: OWASP dependency check
+        uses: dependency-check/Dependency-Check_Action@main
+        with:
+          project: pr-validation
+          path: "."
+          format: "HTML"
+
+      # -----------------------------------------------------------------------
+      # 10. Upload Dependency Report (Always)
+      # -----------------------------------------------------------------------
+      - name: Upload dependency scan report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dependency-check-report
+          path: dependency-check-report.html
